@@ -1,0 +1,35 @@
+---
+description: Delegate bounded tasks to Codex subagent
+alwaysApply: true
+---
+
+# Codex Delegation Rule
+
+Use the local `Codex CLI` wrapper when the task is narrow, bounded, and would benefit from being executed as a child agent with durable artifacts.
+
+Delegate when:
+
+- the task can be described with a clear goal, scope, and constraints
+- the parent agent wants a stable `summary.md`, `result.json`, or `diff.patch`
+- the repo is already noisy and you want to reduce context pollution
+- read-only analysis can be offloaded before the parent agent makes a decision
+
+Do not delegate when:
+
+- the task is too ambiguous to scope
+- the task requires broad cross-repo architectural decisions first
+- the parent agent still needs to clarify requirements with the user
+
+Preferred workflow:
+
+1. Build a task JSON with `task_id`, `goal`, `scope`, `constraints`, and `validation_commands`.
+2. Use `tools/codex_orchestrator.py` to create the task file and launch `scripts/codex-subagent.ps1`.
+3. Read `result.json` and `summary.md` before taking follow-up action.
+4. Review `changed_files` and `diff.patch` before trusting writable runs.
+
+Example:
+
+```text
+Delegate a read-only subtask to inspect auth flow in app.py and templates/login.html,
+then summarize the result from result.json and summary.md before making edits.
+```

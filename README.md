@@ -14,9 +14,11 @@ This repository packages the implementation logic and the helper files required 
 ## Repository Layout
 
 - `scripts/codex-subagent.ps1`: PowerShell wrapper that launches `Codex CLI`
+- `tools/codex_orchestrator.py`: lightweight task generator and launcher
 - `tools/codex-subagent-prompt.md`: prompt template for delegated runs
 - `tools/codex-task.example.json`: task spec example
 - `docs/implementation.md`: architecture, execution flow, and practical notes
+- `.cursor/rules/codex-delegation.mdc`: Cursor rule for when to delegate
 
 ## Workflow
 
@@ -59,6 +61,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\codex-subagent.ps1 `
   -TaskFile .\tools\codex-task.example.json
 ```
 
+Or let the orchestrator generate the task file for you:
+
+```powershell
+python .\tools\codex_orchestrator.py `
+  --goal "Inspect the auth flow and summarize redirect behavior" `
+  --scope app.py `
+  --scope templates/login.html `
+  --readonly `
+  --no-worktree
+```
+
 Run a task in read-only mode:
 
 ```powershell
@@ -93,6 +106,23 @@ The wrapper captures both the baseline dirty state and the post-run dirty state 
 - files that were already dirty before the run
 - files that are dirty after the run
 - files that changed because of the delegated task
+
+## Cursor Rule
+
+The repository also includes a project rule in `.cursor/rules/codex-delegation.mdc`.
+
+That rule tells the parent agent to prefer delegation when:
+
+- the task is bounded and can be expressed as a clear goal plus scope
+- durable artifacts like `summary.md` or `result.json` are useful
+- the parent agent wants to reduce context pollution in the main conversation
+
+The expected flow is:
+
+1. Generate a task JSON.
+2. Launch the child run with `tools/codex_orchestrator.py` or `scripts/codex-subagent.ps1`.
+3. Read `summary.md` and `result.json`.
+4. Decide whether to apply or continue from the delegated output.
 
 ## Notes
 

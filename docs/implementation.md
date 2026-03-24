@@ -105,7 +105,11 @@ That gives the parent agent enough structure to:
 
 If you want to extend this prototype, the next natural additions are:
 
-- a small `Python` or `Node` orchestrator that generates task JSON automatically
-- project-specific Cursor rules that tell the main agent when to delegate
 - richer schemas for result validation
 - first-class retry or timeout handling for long-running delegated tasks
+- repository-specific result post-processing for writable runs
+
+This repository already includes:
+
+- `tools/codex_orchestrator.py` for task generation and wrapper invocation
+- `.cursor/rules/codex-delegation.mdc` for persistent delegation guidance inside Cursor
