@@ -176,12 +176,7 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    timeout = args.timeout if args.timeout > 0 else None
-    try:
-        result = subprocess.run(command, cwd=repo_root, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        print(f"[orchestrator] ERROR: task timed out after {args.timeout}s", file=sys.stderr)
-        return 124
+    result = subprocess.run(command, cwd=repo_root)
 
     output_dir = repo_root / task["output_dir"]
     result_file = output_dir / "result.json"

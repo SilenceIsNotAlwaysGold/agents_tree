@@ -367,7 +367,8 @@ $statusPath = Join-Path $outputDir "git-status.txt"
 $baselineStatusPath = Join-Path $outputDir "git-status-before.txt"
 $startedAt = (Get-Date).ToString("o")
 
-Set-Content -LiteralPath $promptPath -Value $prompt -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($promptPath, $prompt, $utf8NoBom)
 
 $baselineStatusLines = Get-GitStatusLines -WorkspacePath $workspacePath
 $baselinePaths = Get-RelativePathsFromStatusLines -StatusLines $baselineStatusLines
@@ -424,13 +425,14 @@ $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
 }
 
 $summaryText = if (Test-Path -LiteralPath $summaryPath) {
-    "$((Get-Content -LiteralPath $summaryPath -Raw))".Trim()
+    [System.IO.File]::ReadAllText($summaryPath, [System.Text.Encoding]::UTF8).Trim()
 } elseif ([string]::IsNullOrWhiteSpace($stdoutText)) {
     "_Codex returned no final message. Check codex.stderr.log for details._"
 } else {
     $stdoutText
 }
-Set-Content -LiteralPath $summaryPath -Value $summaryText -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($summaryPath, $summaryText, $utf8NoBom)
 
 $gitStatus = Get-GitStatusLines -WorkspacePath $workspacePath
 $currentPaths = Get-RelativePathsFromStatusLines -StatusLines $gitStatus
@@ -503,7 +505,8 @@ $result = [ordered]@{
     }
 }
 
-$result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+$resultJson = $result | ConvertTo-Json -Depth 6
+[System.IO.File]::WriteAllText($resultPath, $resultJson, $utf8NoBom)
 
 Write-Step "Summary: $summaryPath"
 Write-Step "Result JSON: $resultPath"
