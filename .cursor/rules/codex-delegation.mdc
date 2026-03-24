@@ -7,29 +7,50 @@ alwaysApply: true
 
 Use the local `Codex CLI` wrapper when the task is narrow, bounded, and would benefit from being executed as a child agent with durable artifacts.
 
-Delegate when:
+## When to Delegate
 
-- the task can be described with a clear goal, scope, and constraints
-- the parent agent wants a stable `summary.md`, `result.json`, or `diff.patch`
-- the repo is already noisy and you want to reduce context pollution
-- read-only analysis can be offloaded before the parent agent makes a decision
+- The task can be described with a clear goal, scope, and constraints
+- The parent agent wants a stable `summary.md`, `result.json`, or `diff.patch`
+- The repo is already noisy and you want to reduce context pollution
+- Read-only analysis can be offloaded before the parent agent makes a decision
+- Multiple independent tasks should run in parallel
 
-Do not delegate when:
+## When NOT to Delegate
 
-- the task is too ambiguous to scope
-- the task requires broad cross-repo architectural decisions first
-- the parent agent still needs to clarify requirements with the user
+- The task is too ambiguous to scope
+- The task requires broad cross-repo architectural decisions first
+- The parent agent still needs to clarify requirements with the user
 
-Preferred workflow:
+## Single Task Workflow
 
 1. Build a task JSON with `task_id`, `goal`, `scope`, `constraints`, and `validation_commands`.
 2. Use `tools/codex_orchestrator.py` to create the task file and launch `scripts/codex-subagent.ps1`.
 3. Read `result.json` and `summary.md` before taking follow-up action.
 4. Review `changed_files` and `diff.patch` before trusting writable runs.
 
-Example:
+### For External Repos
 
 ```text
-Delegate a read-only subtask to inspect auth flow in app.py and templates/login.html,
-then summarize the result from result.json and summary.md before making edits.
+python tools/codex_orchestrator.py \
+  --repo-root "c:/path/to/target/repo" \
+  --goal "Implement the auth module" \
+  --scope "src/auth.py" \
+  --context-file "docs/architecture.md" \
+  --timeout 600 \
+  --no-worktree
 ```
+
+## Batch Workflow (Multiple Parallel Tasks)
+
+1. Create a batch JSON file with `defaults` and `tasks` array (each task has `depends_on`).
+2. Run `python tools/batch_runner.py --batch-file batch.json --max-parallel 4`.
+3. The runner resolves dependency order and runs independent tasks in parallel.
+4. Check the generated `*-results.json` for overall status.
+
+## Result Status Values
+
+- `success` — Codex completed and all validation commands passed
+- `failed` — Codex exited with non-zero code
+- `validation_failed` — Codex succeeded but a validation command failed
+- `timeout` — Codex was killed after the timeout period
+- `skipped` — Task was skipped due to a prior dependency failure (with `--stop-on-failure`)

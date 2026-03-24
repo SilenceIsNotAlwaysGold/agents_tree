@@ -7,6 +7,10 @@ Workspace: `{{WORKSPACE_PATH}}`
 
 {{GOAL}}
 
+## Project Context
+
+{{PROJECT_CONTEXT}}
+
 ## Allowed Scope
 
 {{SCOPE}}

@@ -1,0 +1,43 @@
+{
+  "defaults": {
+    "repo_root": "c:/Users/clouditera/project/autofish",
+    "base_branch": "main",
+    "no_worktree": true,
+    "context_files": [
+      "docs/autofish-saas-roadmap.md",
+      "docs/task-breakdown.md"
+    ],
+    "constraints": [
+      "Do not modify files outside the declared scope unless required to fix imports.",
+      "Run validation commands before finishing.",
+      "Do not add debug prints or TODO comments."
+    ]
+  },
+  "tasks": [
+    {
+      "task_id": "p0-1-project-restructure",
+      "goal": "Restructure the project: move app.py and src/ into backend/ directory following the target structure defined in docs/autofish-saas-roadmap.md section 4.4. Update all import paths. Ensure existing tests pass.",
+      "scope": [
+        "app.py",
+        "src/",
+        "tests/",
+        "requirements.txt"
+      ],
+      "depends_on": [],
+      "validation_commands": [
+        "cd backend && python -m pytest tests/ -q"
+      ]
+    },
+    {
+      "task_id": "p1-3-vue-scaffold",
+      "goal": "Create a Vue 3 + TypeScript frontend scaffold in frontend/ with Element Plus, Pinia, Vue Router. Include login/register pages, default layout with collapsible sidebar, auth store with JWT token management, and Vite proxy config.",
+      "scope": [
+        "frontend/"
+      ],
+      "depends_on": [],
+      "validation_commands": [
+        "cd frontend && npm run build"
+      ]
+    }
+  ]
+}

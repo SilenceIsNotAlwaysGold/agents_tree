@@ -80,6 +80,26 @@ def parse_args() -> argparse.Namespace:
         help="Codex command name or path",
     )
     parser.add_argument(
+        "--repo-root",
+        help="Target repository root (defaults to the agents_tree repo root)",
+    )
+    parser.add_argument(
+        "--prompt-template",
+        help="Path to a custom prompt template (defaults to tools/codex-subagent-prompt.md)",
+    )
+    parser.add_argument(
+        "--context-file",
+        action="append",
+        default=[],
+        help="Repeatable path to a project context file injected into the prompt",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        help="Timeout in seconds for the Codex run (0 = no timeout)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the task file and print the wrapper command without executing it",
@@ -90,9 +110,9 @@ def parse_args() -> argparse.Namespace:
 def build_task(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
     task_id = args.task_id or slugify(args.goal)
     output_dir = args.output_dir or f".tmp/codex/results/{task_id}"
-    return {
+    task: dict[str, Any] = {
         "task_id": task_id,
-        "repo_root": ".",
+        "repo_root": str(repo_root),
         "goal": args.goal,
         "scope": args.scope,
         "constraints": args.constraint,
@@ -100,6 +120,11 @@ def build_task(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
         "base_branch": args.base_branch,
         "output_dir": output_dir,
     }
+    if args.context_file:
+        task["context_files"] = args.context_file
+    if args.prompt_template:
+        task["prompt_template"] = args.prompt_template
+    return task
 
 
 def write_task_file(repo_root: Path, task: dict[str, Any]) -> Path:
@@ -110,13 +135,13 @@ def write_task_file(repo_root: Path, task: dict[str, Any]) -> Path:
     return task_file
 
 
-def build_wrapper_command(args: argparse.Namespace, repo_root: Path, task_file: Path) -> list[str]:
+def build_wrapper_command(args: argparse.Namespace, agents_tree_root: Path, task_file: Path) -> list[str]:
     command = [
         "powershell",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        str(repo_root / "scripts" / "codex-subagent.ps1"),
+        str(agents_tree_root / "scripts" / "codex-subagent.ps1"),
         "-TaskFile",
         str(task_file),
         "-CodexCommand",
@@ -128,16 +153,22 @@ def build_wrapper_command(args: argparse.Namespace, repo_root: Path, task_file: 
         command.append("-NoWorktree")
     if args.model:
         command.extend(["-Model", args.model])
+    if args.prompt_template:
+        command.extend(["-PromptTemplate", args.prompt_template])
+    if args.timeout > 0:
+        command.extend(["-Timeout", str(args.timeout)])
     return command
 
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    agents_tree_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(args.repo_root).resolve() if args.repo_root else agents_tree_root
     task = build_task(args, repo_root)
     task_file = write_task_file(repo_root, task)
-    command = build_wrapper_command(args, repo_root, task_file)
+    command = build_wrapper_command(args, agents_tree_root, task_file)
 
+    print(f"[orchestrator] repo_root: {repo_root}")
     print(f"[orchestrator] task file: {task_file}")
     print("[orchestrator] command:")
     print(" ".join(f'"{part}"' if " " in part else part for part in command))
@@ -145,7 +176,13 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    result = subprocess.run(command, cwd=repo_root)
+    timeout = args.timeout if args.timeout > 0 else None
+    try:
+        result = subprocess.run(command, cwd=repo_root, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[orchestrator] ERROR: task timed out after {args.timeout}s", file=sys.stderr)
+        return 124
+
     output_dir = repo_root / task["output_dir"]
     result_file = output_dir / "result.json"
     summary_file = output_dir / "summary.md"

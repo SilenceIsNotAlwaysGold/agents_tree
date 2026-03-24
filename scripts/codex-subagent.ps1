@@ -6,6 +6,10 @@ param(
 
     [string]$Model,
 
+    [string]$PromptTemplate,
+
+    [int]$Timeout = 0,
+
     [switch]$NoWorktree,
 
     [switch]$Readonly
@@ -275,9 +279,30 @@ $outputDirCandidate = if ($task.PSObject.Properties.Name -contains "output_dir" 
 $outputDir = Resolve-OptionalPath -BasePath $repoRoot -Candidate $outputDirCandidate
 Ensure-Directory -Path $outputDir
 
-$templatePath = Join-Path $repoRoot "tools\codex-subagent-prompt.md"
-if (-not (Test-Path -LiteralPath $templatePath)) {
-    throw "Prompt template not found: $templatePath"
+$templatePath = $null
+if (-not [string]::IsNullOrWhiteSpace($PromptTemplate)) {
+    $templatePath = if ([System.IO.Path]::IsPathRooted($PromptTemplate)) {
+        $PromptTemplate
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $PromptTemplate))
+    }
+} elseif ($task.PSObject.Properties.Name -contains "prompt_template" -and -not [string]::IsNullOrWhiteSpace($task.prompt_template)) {
+    $templatePath = Resolve-OptionalPath -BasePath (Split-Path -Parent $resolvedTaskFile) -Candidate $task.prompt_template
+}
+
+if (-not $templatePath -or -not (Test-Path -LiteralPath $templatePath)) {
+    $fallback = Join-Path $repoRoot "tools\codex-subagent-prompt.md"
+    if (Test-Path -LiteralPath $fallback) {
+        $templatePath = $fallback
+    } else {
+        $scriptDir = Split-Path -Parent $PSScriptRoot
+        $fallback2 = Join-Path $scriptDir "tools\codex-subagent-prompt.md"
+        if (Test-Path -LiteralPath $fallback2) {
+            $templatePath = $fallback2
+        } else {
+            throw "Prompt template not found. Provide -PromptTemplate or place codex-subagent-prompt.md in tools/."
+        }
+    }
 }
 
 $workspacePath = $repoRoot
@@ -307,6 +332,21 @@ $scopeText = Format-BulletList -Items $scopeItems -Fallback "No explicit file sc
 $constraintText = Format-BulletList -Items $constraintItems -Fallback "Do not refactor unrelated files or change dependency versions unless the task explicitly requires it."
 $validationText = Format-BulletList -Items $validationItems -Fallback "No validation commands were provided. If you modify code, run the narrowest relevant verification you can."
 
+$contextText = ""
+if ($task.PSObject.Properties.Name -contains "context_files") {
+    $contextParts = @()
+    foreach ($ctxFile in @($task.context_files)) {
+        $ctxPath = Resolve-OptionalPath -BasePath $repoRoot -Candidate $ctxFile
+        if ($ctxPath -and (Test-Path -LiteralPath $ctxPath)) {
+            $ctxContent = Get-Content -LiteralPath $ctxPath -Raw
+            $contextParts += "### $ctxFile`n`n$ctxContent"
+        }
+    }
+    if ($contextParts.Count -gt 0) {
+        $contextText = ($contextParts -join "`n`n---`n`n")
+    }
+}
+
 $template = Get-Content -LiteralPath $templatePath -Raw
 $prompt = $template.
     Replace("{{TASK_ID}}", $taskId).
@@ -314,7 +354,8 @@ $prompt = $template.
     Replace("{{WORKSPACE_PATH}}", $workspacePath).
     Replace("{{SCOPE}}", $scopeText).
     Replace("{{CONSTRAINTS}}", $constraintText).
-    Replace("{{VALIDATION_COMMANDS}}", $validationText)
+    Replace("{{VALIDATION_COMMANDS}}", $validationText).
+    Replace("{{PROJECT_CONTEXT}}", $contextText)
 
 $promptPath = Join-Path $outputDir "prompt.md"
 $summaryPath = Join-Path $outputDir "summary.md"
@@ -350,7 +391,7 @@ $codexArgs += @("--output-last-message", $summaryPath, "-")
 Write-Step "Running Codex in $sandboxMode mode"
 $startProcessArgs = @{
     NoNewWindow = $true
-    Wait = $true
+    Wait = $false
     PassThru = $true
     FilePath = $nodeCommand.Source
     ArgumentList = @($codexEntry) + $codexArgs
@@ -359,7 +400,21 @@ $startProcessArgs = @{
     RedirectStandardError = $stderrPath
 }
 $process = Start-Process @startProcessArgs
-$codexExitCode = $process.ExitCode
+
+if ($Timeout -gt 0) {
+    $completed = $process.WaitForExit($Timeout * 1000)
+    if (-not $completed) {
+        Write-Step "ERROR: Codex timed out after ${Timeout}s, killing process"
+        $process.Kill()
+        $process.WaitForExit(5000)
+        $codexExitCode = 124
+    } else {
+        $codexExitCode = $process.ExitCode
+    }
+} else {
+    $process.WaitForExit()
+    $codexExitCode = $process.ExitCode
+}
 
 $finishedAt = (Get-Date).ToString("o")
 $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
@@ -381,16 +436,49 @@ $gitStatus = Get-GitStatusLines -WorkspacePath $workspacePath
 $currentPaths = Get-RelativePathsFromStatusLines -StatusLines $gitStatus
 $currentFingerprints = Get-FingerprintMap -WorkspacePath $workspacePath -RelativePaths $currentPaths
 $changedFiles = Compare-ChangedFiles -BaselinePaths $baselinePaths -BaselineFingerprints $baselineFingerprints -CurrentPaths $currentPaths -CurrentFingerprints $currentFingerprints
+$addUntrackedCommand = 'git -C "{0}" add --intent-to-add --all 2>nul' -f $workspacePath
+cmd.exe /d /c $addUntrackedCommand | Out-Null
 $patchCommand = 'git -C "{0}" diff --binary 2>nul' -f $workspacePath
 $patchText = @(cmd.exe /d /c $patchCommand)
+$resetCommand = 'git -C "{0}" reset 2>nul' -f $workspacePath
+cmd.exe /d /c $resetCommand | Out-Null
 
 Set-Content -LiteralPath $statusPath -Value (($gitStatus | ForEach-Object { "$_" }) -join [Environment]::NewLine) -Encoding UTF8
 Set-Content -LiteralPath $patchPath -Value (($patchText | ForEach-Object { "$_" }) -join [Environment]::NewLine) -Encoding UTF8
 
+$validationResults = @()
+if ($codexExitCode -eq 0 -and -not $Readonly) {
+    $rawValidation = @($task.validation_commands)
+    $validationCmds = @($rawValidation | ForEach-Object { "$_".Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+    foreach ($cmd in $validationCmds) {
+        Write-Step "Running validation: $cmd"
+        $valOutput = cmd.exe /d /c "cd /d `"$workspacePath`" && $cmd 2>&1"
+        $valExit = $LASTEXITCODE
+        $validationResults += [ordered]@{
+            command = $cmd
+            exit_code = $valExit
+            passed = ($valExit -eq 0)
+        }
+        if ($valExit -ne 0) {
+            Write-Step "WARN: validation failed: $cmd (exit $valExit)"
+        }
+    }
+}
+
+$allValidationsPassed = ($validationResults.Count -eq 0) -or ($validationResults | Where-Object { -not $_.passed }).Count -eq 0
+$overallStatus = if ($codexExitCode -ne 0) {
+    "failed"
+} elseif (-not $allValidationsPassed) {
+    "validation_failed"
+} else {
+    "success"
+}
+
 $result = [ordered]@{
     task_id = $taskId
     goal = $task.goal.Trim()
-    status = if ($codexExitCode -eq 0) { "success" } else { "failed" }
+    status = $overallStatus
     codex_exit_code = $codexExitCode
     readonly = [bool]$Readonly
     used_worktree = -not $NoWorktree
@@ -403,6 +491,7 @@ $result = [ordered]@{
     preexisting_changed_files = $baselinePaths
     all_changed_files = $currentPaths
     changed_files = $changedFiles
+    validation = $validationResults
     output = [ordered]@{
         prompt = $promptPath
         summary = $summaryPath

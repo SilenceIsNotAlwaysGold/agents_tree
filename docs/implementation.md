@@ -101,15 +101,44 @@ That gives the parent agent enough structure to:
 - review the patch
 - chain another delegated task
 
-## Suggested Next Steps
+## Cross-Repository Usage
 
-If you want to extend this prototype, the next natural additions are:
+The tools support targeting external repositories:
 
-- richer schemas for result validation
-- first-class retry or timeout handling for long-running delegated tasks
-- repository-specific result post-processing for writable runs
+```powershell
+python tools/codex_orchestrator.py \
+  --repo-root "c:/Users/me/project/my-app" \
+  --goal "Refactor the auth module" \
+  --scope "src/auth.py" \
+  --context-file "docs/architecture.md" \
+  --no-worktree
+```
 
-This repository already includes:
+The `--context-file` flag injects project documentation into the prompt so Codex has relevant background.
 
-- `tools/codex_orchestrator.py` for task generation and wrapper invocation
-- `.cursor/rules/codex-delegation.mdc` for persistent delegation guidance inside Cursor
+## Batch Execution
+
+`tools/batch_runner.py` runs multiple tasks with dependency management and parallelism:
+
+```powershell
+python tools/batch_runner.py --batch-file tasks/my-batch.json --max-parallel 4
+```
+
+The batch file declares tasks with `depends_on` arrays. The runner resolves the topological order and runs independent tasks in parallel.
+
+## Timeout and Validation
+
+- `--timeout 600` kills the Codex process after 600 seconds
+- `validation_commands` are automatically executed after a successful Codex run
+- Results distinguish `success`, `failed`, and `validation_failed` status
+
+## Diff Tracking
+
+The wrapper now captures untracked (newly created) files in `diff.patch` by temporarily staging them with `git add --intent-to-add` before diffing, then resetting.
+
+## Components
+
+- `tools/codex_orchestrator.py` — task generation, wrapper invocation, timeout
+- `tools/batch_runner.py` — parallel batch execution with dependency resolution
+- `scripts/codex-subagent.ps1` — core wrapper with process management
+- `.cursor/rules/codex-delegation.mdc` — persistent delegation guidance inside Cursor
