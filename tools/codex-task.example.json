@@ -1,0 +1,19 @@
+{
+  "task_id": "fix-auth-timeout",
+  "repo_root": ".",
+  "goal": "Read the auth flow, fix the timeout redirect bug, and add the narrowest useful test coverage.",
+  "scope": [
+    "src/routes/auth.py",
+    "tests/test_auth.py"
+  ],
+  "constraints": [
+    "Only modify files in scope unless a tiny adjacent change is required to keep tests passing.",
+    "Prefer the smallest possible behavior fix.",
+    "Do not refactor unrelated auth logic."
+  ],
+  "validation_commands": [
+    "pytest tests/test_auth.py -q"
+  ],
+  "base_branch": "main",
+  "output_dir": ".tmp/codex/results/fix-auth-timeout"
+}
