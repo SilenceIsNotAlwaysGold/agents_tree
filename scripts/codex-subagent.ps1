@@ -12,6 +12,8 @@ param(
 
     [switch]$NoWorktree,
 
+    [int]$MaxRetries = 0,
+
     [switch]$Readonly
 )
 
@@ -348,14 +350,20 @@ if ($task.PSObject.Properties.Name -contains "context_files") {
 }
 
 $template = Get-Content -LiteralPath $templatePath -Raw
+
+if ([string]::IsNullOrWhiteSpace($contextText)) {
+    $template = $template -replace "(?m)^## Project Context\s*\r?\n\s*\{\{PROJECT_CONTEXT\}\}\s*\r?\n?", ""
+} else {
+    $template = $template.Replace("{{PROJECT_CONTEXT}}", $contextText)
+}
+
 $prompt = $template.
     Replace("{{TASK_ID}}", $taskId).
     Replace("{{GOAL}}", $task.goal.Trim()).
     Replace("{{WORKSPACE_PATH}}", $workspacePath).
     Replace("{{SCOPE}}", $scopeText).
     Replace("{{CONSTRAINTS}}", $constraintText).
-    Replace("{{VALIDATION_COMMANDS}}", $validationText).
-    Replace("{{PROJECT_CONTEXT}}", $contextText)
+    Replace("{{VALIDATION_COMMANDS}}", $validationText)
 
 $promptPath = Join-Path $outputDir "prompt.md"
 $summaryPath = Join-Path $outputDir "summary.md"
@@ -373,7 +381,8 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $baselineStatusLines = Get-GitStatusLines -WorkspacePath $workspacePath
 $baselinePaths = Get-RelativePathsFromStatusLines -StatusLines $baselineStatusLines
 $baselineFingerprints = Get-FingerprintMap -WorkspacePath $workspacePath -RelativePaths $baselinePaths
-Set-Content -LiteralPath $baselineStatusPath -Value (($baselineStatusLines | ForEach-Object { "$_" }) -join [Environment]::NewLine) -Encoding UTF8
+$baselineStatusText = ($baselineStatusLines | ForEach-Object { "$_" }) -join [Environment]::NewLine
+[System.IO.File]::WriteAllText($baselineStatusPath, $baselineStatusText, $utf8NoBom)
 
 $sandboxMode = if ($Readonly) { "read-only" } else { "workspace-write" }
 $codexArgs = @("exec", "--cd", $workspacePath)
@@ -389,37 +398,73 @@ if (-not [string]::IsNullOrWhiteSpace($Model)) {
 }
 $codexArgs += @("--output-last-message", $summaryPath, "-")
 
-Write-Step "Running Codex in $sandboxMode mode"
-$startProcessArgs = @{
-    NoNewWindow = $true
-    Wait = $false
-    PassThru = $true
-    FilePath = $nodeCommand.Source
-    ArgumentList = @($codexEntry) + $codexArgs
-    RedirectStandardInput = $promptPath
-    RedirectStandardOutput = $stdoutPath
-    RedirectStandardError = $stderrPath
-}
-$process = Start-Process @startProcessArgs
+$allCodexArgs = @($codexEntry) + $codexArgs
+$nodeExe = $nodeCommand.Source
+$codexExitCode = $null
+$attempt = 0
+$maxAttempts = 1 + [Math]::Max(0, $MaxRetries)
 
-if ($Timeout -gt 0) {
-    $completed = $process.WaitForExit($Timeout * 1000)
-    if (-not $completed) {
-        Write-Step "ERROR: Codex timed out after ${Timeout}s, killing process"
-        $process.Kill()
-        $process.WaitForExit(5000)
-        $codexExitCode = 124
+while ($attempt -lt $maxAttempts) {
+    $attempt++
+    if ($attempt -gt 1) {
+        $backoffSeconds = [Math]::Min(300, 30 * [Math]::Pow(2, $attempt - 2))
+        Write-Step "Retry $($attempt - 1)/$MaxRetries in ${backoffSeconds}s..."
+        Start-Sleep -Seconds $backoffSeconds
+    }
+
+    Write-Step "Running Codex in $sandboxMode mode (attempt $attempt/$maxAttempts)"
+
+    if ($Timeout -gt 0) {
+        $process = Start-Process -NoNewWindow -PassThru `
+            -FilePath $nodeExe `
+            -ArgumentList $allCodexArgs `
+            -RedirectStandardInput $promptPath `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        $completed = $process.WaitForExit($Timeout * 1000)
+        if (-not $completed) {
+            Write-Step "ERROR: Codex timed out after ${Timeout}s, killing process"
+            try { $process.Kill() } catch {}
+            $process.WaitForExit(5000)
+            $codexExitCode = 124
+        } else {
+            $process.WaitForExit()
+            $codexExitCode = $process.ExitCode
+        }
     } else {
+        $process = Start-Process -NoNewWindow -Wait -PassThru `
+            -FilePath $nodeExe `
+            -ArgumentList $allCodexArgs `
+            -RedirectStandardInput $promptPath `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
         $codexExitCode = $process.ExitCode
     }
-} else {
-    $process.WaitForExit()
-    $codexExitCode = $process.ExitCode
+
+    if ($null -eq $codexExitCode) {
+        Write-Step "WARN: ExitCode was null, treating as failure"
+        $codexExitCode = 1
+    }
+
+    if ($codexExitCode -eq 0) {
+        break
+    }
+
+    $stderrContent = ""
+    if (Test-Path -LiteralPath $stderrPath) {
+        $stderrContent = [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8)
+    }
+    $retryable = $stderrContent -match "503|502|429|熔断|circuit.?break|rate.?limit|unavailable"
+    if (-not $retryable -or $attempt -ge $maxAttempts) {
+        break
+    }
+    Write-Step "Detected retryable error, will retry..."
 }
 
 $finishedAt = (Get-Date).ToString("o")
 $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
-    "$((Get-Content -LiteralPath $stdoutPath -Raw))".Trim()
+    [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::UTF8).Trim()
 } else {
     ""
 }
@@ -431,7 +476,6 @@ $summaryText = if (Test-Path -LiteralPath $summaryPath) {
 } else {
     $stdoutText
 }
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($summaryPath, $summaryText, $utf8NoBom)
 
 $gitStatus = Get-GitStatusLines -WorkspacePath $workspacePath
@@ -445,8 +489,10 @@ $patchText = @(cmd.exe /d /c $patchCommand)
 $resetCommand = 'git -C "{0}" reset 2>nul' -f $workspacePath
 cmd.exe /d /c $resetCommand | Out-Null
 
-Set-Content -LiteralPath $statusPath -Value (($gitStatus | ForEach-Object { "$_" }) -join [Environment]::NewLine) -Encoding UTF8
-Set-Content -LiteralPath $patchPath -Value (($patchText | ForEach-Object { "$_" }) -join [Environment]::NewLine) -Encoding UTF8
+$statusText = ($gitStatus | ForEach-Object { "$_" }) -join [Environment]::NewLine
+[System.IO.File]::WriteAllText($statusPath, $statusText, $utf8NoBom)
+$patchContent = ($patchText | ForEach-Object { "$_" }) -join [Environment]::NewLine
+[System.IO.File]::WriteAllText($patchPath, $patchContent, $utf8NoBom)
 
 $validationResults = @()
 if ($codexExitCode -eq 0 -and -not $Readonly) {
@@ -482,6 +528,7 @@ $result = [ordered]@{
     goal = $task.goal.Trim()
     status = $overallStatus
     codex_exit_code = $codexExitCode
+    attempts = $attempt
     readonly = [bool]$Readonly
     used_worktree = -not $NoWorktree
     branch = $branchName

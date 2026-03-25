@@ -58,8 +58,22 @@ def merge_defaults(task: dict[str, Any], defaults: dict[str, Any]) -> dict[str, 
     return merged
 
 
+def validate_dependencies(tasks: list[dict[str, Any]]) -> None:
+    """Raise ValueError if any depends_on references a non-existent task_id."""
+    known_ids = {t["task_id"] for t in tasks}
+    for task in tasks:
+        for dep in task.get("depends_on", []):
+            if dep not in known_ids:
+                raise ValueError(
+                    f"Task '{task['task_id']}' depends on '{dep}' which does not exist. "
+                    f"Known task IDs: {sorted(known_ids)}"
+                )
+
+
 def resolve_execution_order(tasks: list[dict[str, Any]]) -> list[list[str]]:
     """Topological sort into parallel batches."""
+    validate_dependencies(tasks)
+
     task_map = {t["task_id"]: t for t in tasks}
     completed: set[str] = set()
     batches: list[list[str]] = []
@@ -75,7 +89,7 @@ def resolve_execution_order(tasks: list[dict[str, Any]]) -> list[list[str]]:
         if not ready:
             unresolved = remaining - completed
             raise ValueError(
-                f"Circular or unsatisfied dependencies: {unresolved}. "
+                f"Circular dependencies detected: {unresolved}. "
                 f"Completed: {completed}"
             )
 
@@ -91,6 +105,7 @@ def run_single_task(
     task: dict[str, Any],
     dry_run: bool = False,
     timeout: int = 0,
+    max_retries: int = 0,
 ) -> dict[str, Any]:
     """Run one task via codex_orchestrator.py, return result summary."""
     task_id = task["task_id"]
@@ -132,6 +147,9 @@ def run_single_task(
     if timeout > 0:
         cmd.extend(["--timeout", str(timeout)])
 
+    if max_retries > 0:
+        cmd.extend(["--max-retries", str(max_retries)])
+
     if dry_run:
         cmd.append("--dry-run")
 
@@ -139,12 +157,7 @@ def run_single_task(
     start = time.time()
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout if timeout > 0 else None,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
         elapsed = time.time() - start
         stdout_tail = result.stdout[-500:] if result.stdout else ""
         stderr_tail = result.stderr[-500:] if result.stderr else ""
@@ -172,17 +185,6 @@ def run_single_task(
             "result_file": str(result_file) if result_file.exists() else None,
         }
 
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start
-        return {
-            "task_id": task_id,
-            "status": "timeout",
-            "exit_code": 124,
-            "elapsed_seconds": round(elapsed, 1),
-            "stdout_tail": "",
-            "stderr_tail": f"Timed out after {timeout}s",
-            "result_file": None,
-        }
     except Exception as e:
         elapsed = time.time() - start
         return {
@@ -208,6 +210,8 @@ def print_batch_summary(results: list[dict[str, Any]]) -> None:
             "validation_failed": "VFAIL",
             "timeout": "TIMEOUT",
             "error": "ERROR",
+            "skipped": "SKIP",
+            "dep_failed": "DEPF",
         }.get(r["status"], "?")
 
         print(f"  [{icon:>5}] {r['task_id']:<20} ({r['elapsed_seconds']}s)")
@@ -223,6 +227,7 @@ def main() -> int:
     parser.add_argument("--batch-file", required=True, help="Path to batch JSON file")
     parser.add_argument("--max-parallel", type=int, default=4, help="Max concurrent tasks")
     parser.add_argument("--timeout", type=int, default=0, help="Per-task timeout in seconds")
+    parser.add_argument("--max-retries", type=int, default=0, help="Retries with exponential backoff on transient errors")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
     parser.add_argument("--stop-on-failure", action="store_true", help="Stop if any task fails")
     args = parser.parse_args()
@@ -237,27 +242,49 @@ def main() -> int:
     batches = resolve_execution_order(tasks)
     task_map = {t["task_id"]: t for t in tasks}
     all_results: list[dict[str, Any]] = []
-    failed = False
+    failed_ids: set[str] = set()
+    any_failed = False
+
+    def _deps_failed(tid: str) -> bool:
+        deps = set(task_map[tid].get("depends_on", []))
+        return bool(deps & failed_ids)
 
     for batch_idx, batch_task_ids in enumerate(batches):
         print(f"\n{'='*60}")
         print(f"BATCH {batch_idx + 1}/{len(batches)}: {', '.join(batch_task_ids)}")
         print(f"{'='*60}")
 
-        if failed and args.stop_on_failure:
-            print("[batch] skipping due to prior failure")
+        if any_failed and args.stop_on_failure:
+            print("[batch] skipping entire batch due to --stop-on-failure")
             for tid in batch_task_ids:
                 all_results.append({
                     "task_id": tid, "status": "skipped", "exit_code": -1,
-                    "elapsed_seconds": 0, "stdout_tail": "", "stderr_tail": "",
+                    "elapsed_seconds": 0, "stdout_tail": "", "stderr_tail": "skipped: --stop-on-failure",
                     "result_file": None,
                 })
+                failed_ids.add(tid)
             continue
 
-        batch_tasks = [task_map[tid] for tid in batch_task_ids]
-        batch_results = []
+        runnable_tasks = []
+        for tid in batch_task_ids:
+            if _deps_failed(tid):
+                dep_names = sorted(set(task_map[tid].get("depends_on", [])) & failed_ids)
+                print(f"[batch] [SKIP] {tid} — dependency failed: {dep_names}")
+                all_results.append({
+                    "task_id": tid, "status": "dep_failed", "exit_code": -1,
+                    "elapsed_seconds": 0, "stdout_tail": "",
+                    "stderr_tail": f"Skipped: dependency failed ({', '.join(dep_names)})",
+                    "result_file": None,
+                })
+                failed_ids.add(tid)
+            else:
+                runnable_tasks.append(task_map[tid])
 
-        max_workers = min(args.max_parallel, len(batch_tasks))
+        if not runnable_tasks:
+            continue
+
+        batch_results = []
+        max_workers = min(args.max_parallel, len(runnable_tasks))
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
@@ -266,8 +293,9 @@ def main() -> int:
                     task,
                     args.dry_run,
                     args.timeout,
+                    args.max_retries,
                 ): task["task_id"]
-                for task in batch_tasks
+                for task in runnable_tasks
             }
 
             for future in as_completed(futures):
@@ -286,7 +314,8 @@ def main() -> int:
                 print(f"[batch] [{icon}] {task_id} ({result['elapsed_seconds']}s)")
 
                 if result["status"] != "success":
-                    failed = True
+                    any_failed = True
+                    failed_ids.add(task_id)
 
         all_results.extend(batch_results)
 
@@ -296,7 +325,7 @@ def main() -> int:
 
     print_batch_summary(all_results)
 
-    return 0 if not failed else 1
+    return 0 if not any_failed else 1
 
 
 if __name__ == "__main__":

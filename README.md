@@ -15,9 +15,12 @@ This repository packages the implementation logic and the helper files required 
 
 - `scripts/codex-subagent.ps1`: PowerShell wrapper that launches `Codex CLI`
 - `tools/codex_orchestrator.py`: lightweight task generator and launcher
+- `tools/batch_runner.py`: parallel batch runner with dependency management
 - `tools/codex-subagent-prompt.md`: prompt template for delegated runs
-- `tools/codex-task.example.json`: task spec example
+- `tools/codex-task.example.json`: single task spec example
+- `tools/batch-task.example.json`: batch task spec example
 - `docs/implementation.md`: architecture, execution flow, and practical notes
+- `docs/cursor-codex-experience-report.md`: real-world usage report (Chinese)
 - `.cursor/rules/codex-delegation.mdc`: Cursor rule for when to delegate
 
 ## Workflow
@@ -86,6 +89,15 @@ Run directly in the current repository instead of an isolated worktree:
 powershell -ExecutionPolicy Bypass -File .\scripts\codex-subagent.ps1 `
   -TaskFile .\tools\codex-task.example.json `
   -NoWorktree
+```
+
+Run with automatic retry on transient API errors (e.g. 503):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex-subagent.ps1 `
+  -TaskFile .\tools\codex-task.example.json `
+  -MaxRetries 3 `
+  -Timeout 600
 ```
 
 ## What The Script Produces

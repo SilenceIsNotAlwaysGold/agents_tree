@@ -100,6 +100,12 @@ def parse_args() -> argparse.Namespace:
         help="Timeout in seconds for the Codex run (0 = no timeout)",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="Number of retries with exponential backoff on transient API errors (0 = no retry)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the task file and print the wrapper command without executing it",
@@ -157,6 +163,8 @@ def build_wrapper_command(args: argparse.Namespace, agents_tree_root: Path, task
         command.extend(["-PromptTemplate", args.prompt_template])
     if args.timeout > 0:
         command.extend(["-Timeout", str(args.timeout)])
+    if args.max_retries > 0:
+        command.extend(["-MaxRetries", str(args.max_retries)])
     return command
 
 

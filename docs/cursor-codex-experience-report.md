@@ -90,19 +90,13 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 **当前应对**：通过检查实际生成的文件和 `summary.md` 是否非空来间接判断任务是否成功。
 
-**推荐修复**：
+**已实施修复**：
 
-```powershell
-# 方案 A：使用 -Wait 确保退出码可获取
-$process = Start-Process -FilePath "codex" -ArgumentList $args -PassThru -Wait
-$exitCode = $process.ExitCode
+- 无超时时使用 `Start-Process -Wait -PassThru`，确保 `ExitCode` 在进程退出后立即可用
+- 有超时时，`WaitForExit(ms)` 返回 `$true` 后追加一次 `WaitForExit()` 确保句柄关闭
+- 最终增加 null-guard：若 `ExitCode` 仍为 `$null`，视为失败（exit code 1）
 
-# 方案 B：使用 & 运算符直接执行
-& codex exec @args
-$exitCode = $LASTEXITCODE
-```
-
-**状态**：⚠️ 已知问题，待修复。
+**状态**：✅ 已修复。
 
 ---
 
@@ -119,12 +113,12 @@ $exitCode = $LASTEXITCODE
 2. **稍后重试**：等待熔断恢复后重试 Codex（但同一会话中 API 可能持续不可用）
 3. **任务拆分**：将大任务拆分为更小的子任务，减少单次 API 调用的持续时间
 
-**建议改进**：
-- 在 PS1 脚本中增加 `-MaxRetries` 参数，实现自动重试（指数退避：30s → 60s → 120s）
-- 在 orchestrator 层面实现任务级别的重试
-- 监控 API 可用性，在熔断期间自动暂停任务队列
+**已实施改进**：
+- PS1 脚本新增 `-MaxRetries` 参数，实现自动重试（指数退避：30s → 60s → 120s → 300s 上限）
+- 重试仅在检测到瞬时错误（503、502、429、熔断、rate limit）时触发
+- `codex_orchestrator.py` 和 `batch_runner.py` 均支持 `--max-retries` 参数透传
 
-**状态**：⚠️ 已知问题，手动降级应对中。
+**状态**：✅ 已实现自动重试机制。
 
 ---
 
@@ -181,29 +175,37 @@ $exitCode = $LASTEXITCODE
 
 | 改动 | 说明 |
 |------|------|
-| 无 BOM UTF-8 编码 | 使用 `[System.IO.File]::WriteAllText` 配合 `UTF8Encoding($false)` 替代 `Set-Content`，避免中文乱码 |
-| `-Timeout` 参数 | 新增超时参数，控制 Codex CLI 的最大执行时间 |
+| 无 BOM UTF-8 编码 | **所有**文件写入统一使用 `[System.IO.File]::WriteAllText` + `UTF8Encoding($false)`，包括 git-status、diff.patch |
+| `-Timeout` 参数 | 超时参数，控制 Codex CLI 的最大执行时间 |
+| `-MaxRetries` 参数 | 指数退避自动重试（30s → 60s → 120s → 300s 上限），仅在检测到瞬时错误时触发 |
 | `-PromptTemplate` 参数 | 支持自定义 prompt 模板 |
+| 修复 `ExitCode` 为 null | 无超时时使用 `-Wait -PassThru`；有超时时追加 `WaitForExit()`；最终 null-guard 兜底 |
 | 改进 diff.patch 生成 | 通过临时 `git add --intent-to-add` 将未跟踪文件纳入 diff |
 | 验证命令执行 | 支持在 Codex 完成后执行验证命令，将结果写入 `result.json` |
+| 空上下文处理 | 无 `context_files` 时，prompt 中的 `## Project Context` 章节自动移除 |
 
 #### 2. `codex_orchestrator.py`
 
 | 改动 | 说明 |
 |------|------|
-| `--repo-root` 参数 | 支持跨仓库使用，在其他仓库中执行 Codex 任务 |
-| `--context-file` 参数 | 将指定文件内容注入 Codex prompt，提供额外上下文 |
+| `--repo-root` 参数 | 支持跨仓库使用 |
+| `--context-file` 参数 | 将指定文件内容注入 Codex prompt |
 | `--timeout` 参数 | 超时设置透传给 PS1 脚本 |
+| `--max-retries` 参数 | 重试次数透传给 PS1 脚本 |
 | 移除 Python subprocess 超时 | 避免与 PS1 脚本超时机制冲突 |
 
 #### 3. `codex-subagent-prompt.md`
 
 - 添加 `## Project Context` 部分，支持 `{{PROJECT_CONTEXT}}` 占位符注入项目级别的上下文信息
 
-#### 4. 新增 `tools/batch_runner.py`
+#### 4. `tools/batch_runner.py`
 
 - 支持多任务并行执行
 - 拓扑排序管理任务依赖（`depends_on` 数组）
+- 启动前校验 `depends_on` 引用，无效引用立即报错
+- 失败任务的所有下游依赖者自动跳过（状态 `dep_failed`）
+- 移除 `subprocess.run` 的 `timeout` 参数，避免双重超时冲突
+- 支持 `--max-retries` 参数透传
 - 汇总报告输出
 
 #### 5. 新增 `tools/batch-task.example.json`
@@ -214,13 +216,16 @@ $exitCode = $LASTEXITCODE
 
 | 优先级 | 改进项 | 说明 |
 |--------|--------|------|
-| 🔴 高 | 修复 `codex_exit_code` 为 null | 使用 `$LASTEXITCODE` 或 `-PassThru -Wait` 模式 |
-| 🔴 高 | API 503 自动重试 | 指数退避（30s → 60s → 120s），减少因临时故障导致的任务失败 |
-| 🟡 中 | Worktree 自动合并 | `-AutoMerge` 参数，自动 commit + merge 回主分支 |
-| 🟡 中 | 实时进度反馈 | 替代当前的终端文件轮询，使用 named pipe 或 WebSocket |
-| 🟢 低 | 支持 Linux / macOS | 提供 Bash 脚本或使用 PowerShell Core 跨平台 |
-| 🟢 低 | 任务进度回调机制 | 当前只能轮询检查，可增加回调通知 |
-| 🟢 低 | 成本追踪 | 记录每个任务的 token 消耗和 API 调用次数 |
+| ~~🔴 高~~ | ~~修复 `codex_exit_code` 为 null~~ | ✅ 已修复 — `-Wait -PassThru` + null-guard |
+| ~~🔴 高~~ | ~~API 503 自动重试~~ | ✅ 已实现 — `-MaxRetries` 指数退避 |
+| ~~🔴 高~~ | ~~batch_runner 双重超时冲突~~ | ✅ 已修复 — 移除 subprocess timeout |
+| ~~🔴 高~~ | ~~UTF-8 BOM 残留~~ | ✅ 已修复 — 全部文件改用无 BOM 写入 |
+| ~~🟡 中~~ | ~~依赖校验与失败传播~~ | ✅ 已实现 — 无效依赖前置报错 + `dep_failed` 状态 |
+| 🟡 中 | Worktree 自动合并 | 待实现 — `-AutoMerge` 参数 |
+| 🟡 中 | 实时进度反馈 | 待实现 — named pipe 或 WebSocket |
+| 🟢 低 | 支持 Linux / macOS | 待实现 — Bash 脚本或 PowerShell Core |
+| 🟢 低 | 任务进度回调机制 | 待实现 — 回调通知 |
+| 🟢 低 | 成本追踪 | 待实现 — token 消耗记录 |
 
 ---
 

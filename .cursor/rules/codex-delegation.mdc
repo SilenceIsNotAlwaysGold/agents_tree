@@ -30,22 +30,24 @@ Use the local `Codex CLI` wrapper when the task is narrow, bounded, and would be
 
 ### For External Repos
 
-```text
-python tools/codex_orchestrator.py \
-  --repo-root "c:/path/to/target/repo" \
-  --goal "Implement the auth module" \
-  --scope "src/auth.py" \
-  --context-file "docs/architecture.md" \
-  --timeout 600 \
+```powershell
+python tools/codex_orchestrator.py `
+  --repo-root "c:/path/to/target/repo" `
+  --goal "Implement the auth module" `
+  --scope "src/auth.py" `
+  --context-file "docs/architecture.md" `
+  --timeout 600 `
+  --max-retries 2 `
   --no-worktree
 ```
 
 ## Batch Workflow (Multiple Parallel Tasks)
 
 1. Create a batch JSON file with `defaults` and `tasks` array (each task has `depends_on`).
-2. Run `python tools/batch_runner.py --batch-file batch.json --max-parallel 4`.
-3. The runner resolves dependency order and runs independent tasks in parallel.
-4. Check the generated `*-results.json` for overall status.
+2. Run `python tools/batch_runner.py --batch-file batch.json --max-parallel 4 --max-retries 2`.
+3. The runner validates dependencies, resolves topological order, and runs independent tasks in parallel.
+4. Tasks whose dependencies failed are automatically skipped with status `dep_failed`.
+5. Check the generated `*-results.json` for overall status.
 
 ## Result Status Values
 
@@ -53,4 +55,5 @@ python tools/codex_orchestrator.py \
 - `failed` — Codex exited with non-zero code
 - `validation_failed` — Codex succeeded but a validation command failed
 - `timeout` — Codex was killed after the timeout period
-- `skipped` — Task was skipped due to a prior dependency failure (with `--stop-on-failure`)
+- `skipped` — Task was skipped due to `--stop-on-failure`
+- `dep_failed` — Task was skipped because a dependency failed

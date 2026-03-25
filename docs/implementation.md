@@ -126,19 +126,35 @@ python tools/batch_runner.py --batch-file tasks/my-batch.json --max-parallel 4
 
 The batch file declares tasks with `depends_on` arrays. The runner resolves the topological order and runs independent tasks in parallel.
 
-## Timeout and Validation
+## Timeout, Retry, and Validation
 
 - `--timeout 600` kills the Codex process after 600 seconds
+- `--max-retries 3` retries on transient errors (503, 429, rate limits) with exponential backoff (30s → 60s → 120s → 300s cap)
+- Retry logic only triggers on detectable transient errors in stderr; permanent failures exit immediately
 - `validation_commands` are automatically executed after a successful Codex run
-- Results distinguish `success`, `failed`, and `validation_failed` status
+- Results distinguish `success`, `failed`, `validation_failed`, `timeout`, `dep_failed`, and `skipped` status
 
 ## Diff Tracking
 
 The wrapper now captures untracked (newly created) files in `diff.patch` by temporarily staging them with `git add --intent-to-add` before diffing, then resetting.
 
+## Dependency-Aware Batch Execution
+
+The batch runner now validates `depends_on` references at startup — if a task refers to a non-existent `task_id`, execution aborts with a clear error before any work is done.
+
+When a task fails, all downstream dependents are automatically skipped with status `dep_failed`, regardless of whether `--stop-on-failure` is set. This prevents wasted API calls on tasks that cannot succeed.
+
+## Exit Code Reliability
+
+The wrapper uses `Start-Process -Wait -PassThru` for the no-timeout path to ensure `$process.ExitCode` is always populated. For the timeout path, an extra `$process.WaitForExit()` call after `WaitForExit(ms)` returns `$true` ensures the handle is fully closed and `ExitCode` is readable. A final null-guard treats any still-null exit code as failure.
+
+## UTF-8 Without BOM
+
+All file writes in the wrapper use `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)`. This includes `prompt.md`, `summary.md`, `result.json`, `git-status-before.txt`, `git-status.txt`, and `diff.patch`. The PowerShell `Set-Content -Encoding UTF8` cmdlet is avoided entirely because it emits a BOM on Windows PowerShell 5.x.
+
 ## Components
 
-- `tools/codex_orchestrator.py` — task generation, wrapper invocation, timeout
-- `tools/batch_runner.py` — parallel batch execution with dependency resolution
-- `scripts/codex-subagent.ps1` — core wrapper with process management
+- `tools/codex_orchestrator.py` — task generation, wrapper invocation, retry pass-through
+- `tools/batch_runner.py` — parallel batch execution with dependency validation and failure propagation
+- `scripts/codex-subagent.ps1` — core wrapper with process management, retry loop, UTF-8 handling
 - `.cursor/rules/codex-delegation.mdc` — persistent delegation guidance inside Cursor
