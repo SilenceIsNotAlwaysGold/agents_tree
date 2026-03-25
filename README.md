@@ -124,6 +124,12 @@ The expected flow is:
 3. Read `summary.md` and `result.json`.
 4. Decide whether to apply or continue from the delegated output.
 
+## Real-World Usage
+
+This tool has been used in production to develop a FastAPI + Vue SaaS project ([Autofish](../)), orchestrating **12+ Codex tasks** across **3 batches**. The experience uncovered important edge cases around UTF-8 encoding, timeout handling, worktree merging, and API reliability.
+
+A detailed write-up of the issues encountered, solutions applied, and best practices learned is available in [`docs/cursor-codex-experience-report.md`](docs/cursor-codex-experience-report.md).
+
 ## Notes
 
 - The implementation is intentionally minimal and favors scriptability over deep editor integration.
