@@ -126,9 +126,9 @@ The expected flow is:
 
 ## Real-World Usage
 
-This tool has been used in production to develop a FastAPI + Vue SaaS project ([Autofish](../)), orchestrating **12+ Codex tasks** across **3 batches**. The experience uncovered important edge cases around UTF-8 encoding, timeout handling, worktree merging, and API reliability.
+This toolchain was used to build [Autofish](https://github.com/clouditera/autofish), a FastAPI + Vue 3 SaaS platform. Over the course of development, 12+ Codex tasks were orchestrated across 3 batches covering backend APIs, frontend pages, and integration tests.
 
-A detailed write-up of the issues encountered, solutions applied, and best practices learned is available in [`docs/cursor-codex-experience-report.md`](docs/cursor-codex-experience-report.md).
+A detailed experience report — including problems encountered, solutions, and best practices — is available in [`docs/cursor-codex-experience-report.md`](docs/cursor-codex-experience-report.md).
 
 ## Notes
 
